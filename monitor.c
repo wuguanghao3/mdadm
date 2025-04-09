@@ -720,7 +720,7 @@ int monitor_loop_cnt;
 
 static int wait_and_act(struct supertype *container, int nowait)
 {
-	struct active_array *a, **ap, **aap = &container->arrays;
+	struct active_array *tmp_array, *remove, *arrays = container->arrays;
 	static unsigned int dirty_arrays = ~0; /* start at some non-zero value */
 	struct mdinfo *mdi;
 	int rv, maxfd = 0;
@@ -728,19 +728,19 @@ static int wait_and_act(struct supertype *container, int nowait)
 
 	FD_ZERO(&rfds);
 
-	for (ap = aap ; *ap ;) {
-		a = *ap;
+	for (tmp_array = arrays; tmp_array;) {
 		/* once an array has been deactivated we want to
 		 * ask the manager to discard it.
 		 */
-		if (!a->container || a->to_remove) {
+		if (!tmp_array->container || tmp_array->to_remove) {
 			if (discard_this) {
-				ap = &(*ap)->next;
+				tmp_array = tmp_array->next;
 				continue;
 			}
-			*ap = a->next;
-			a->next = NULL;
-			discard_this = a;
+			remove = tmp_array;
+			tmp_array = tmp_array->next;
+			remove->next = NULL;
+			discard_this = remove;
 			signal_manager();
 			continue;
 		}
@@ -749,7 +749,7 @@ static int wait_and_act(struct supertype *container, int nowait)
 		add_fd(&rfds, &maxfd, a->action_fd);
 		add_fd(&rfds, &maxfd, a->sync_completed_fd);
 
-		for (mdi = a->info.devs ; mdi ; mdi = mdi->next) {
+		for (mdi = tmp->info.devs ; mdi ; mdi = mdi->next) {
 			if (mdi->man_disk_to_remove) {
 				mdi->mon_descriptors_not_used = true;
 
@@ -765,10 +765,10 @@ static int wait_and_act(struct supertype *container, int nowait)
 			add_fd(&rfds, &maxfd, mdi->ubb_fd);
 		}
 
-		ap = &(*ap)->next;
+		tmp_array = tmp_array->next;
 	}
 
-	if (manager_ready && (*aap == NULL || (sigterm && !dirty_arrays))) {
+	if (manager_ready && (arrays == NULL || (sigterm && !dirty_arrays))) {
 		/* No interesting arrays, or we have been told to
 		 * terminate and everything is clean.  Lets see about
 		 * exiting.  Note that blocking at this point is not a
@@ -803,7 +803,7 @@ static int wait_and_act(struct supertype *container, int nowait)
 		struct timespec ts;
 		ts.tv_sec = 24*3600;
 		ts.tv_nsec = 0;
-		if (*aap == NULL || container->retry_soon) {
+		if (arrays == NULL || container->retry_soon) {
 			/* just waiting to get O_EXCL access */
 			ts.tv_sec = 0;
 			ts.tv_nsec = 20000000ULL;
@@ -843,22 +843,21 @@ static int wait_and_act(struct supertype *container, int nowait)
 
 	rv = 0;
 	dirty_arrays = 0;
-	for (a = *aap; a ; a = a->next) {
+	for (tmp_array = arrays; tmp_array ; tmp_array = tmp_array->next) {
 
-		if (a->replaces && !discard_this) {
-			struct active_array **ap;
-			for (ap = &a->next; *ap && *ap != a->replaces;
-			     ap = & (*ap)->next)
+		if (tmp_array->replaces && !discard_this) {
+			for (remove = tmp_array->next; remove && remove != tmp_array->replaces;
+			     remove = remove->next)
 				;
-			if (*ap)
-				*ap = (*ap)->next;
-			discard_this = a->replaces;
-			a->replaces = NULL;
+			if (remove)
+				remove = remove->next;
+			discard_this = tmp_array->replaces;
+			tmp_array->replaces = NULL;
 			/* FIXME check if device->state_fd need to be cleared?*/
 			signal_manager();
 		}
-		if (a->container && !a->to_remove) {
-			int ret = read_and_act(a);
+		if (tmp_array->container && !tmp_array->to_remove) {
+			int ret = read_and_act(tmp);
 
 			rv |= 1;
 			dirty_arrays += !!(ret & ARRAY_DIRTY);
@@ -867,19 +866,19 @@ static int wait_and_act(struct supertype *container, int nowait)
 			 * chance to handle 'active_idle'
 			 */
 			if (sigterm && !(ret & ARRAY_DIRTY))
-				a->container = NULL; /* stop touching this array */
+				tmp_array->container = NULL; /* stop touching this array */
 			if (ret & ARRAY_BUSY)
 				container->retry_soon = 1;
 		}
 	}
 
 	/* propagate failures across container members */
-	for (a = *aap; a ; a = a->next) {
-		if (!a->container || a->to_remove)
+	for (tmp_array = arrays; tmp_array ; tmp_array = tmp_array->next) {
+		if (!tmp_array->container || tmp_array->to_remove)
 			continue;
-		for (mdi = a->info.devs ; mdi ; mdi = mdi->next)
+		for (mdi = tmp_array->info.devs ; mdi ; mdi = mdi->next)
 			if (mdi->curr_state & DS_FAULTY)
-				reconcile_failed(*aap, mdi);
+				reconcile_failed(arrays, mdi);
 	}
 
 	return rv;
